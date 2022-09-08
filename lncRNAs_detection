@@ -32,7 +32,7 @@ download from "https://sourceforge.net/projects/rna-cpat/files/v1.2.2/prebuilt_m
 download from "https://sourceforge.net/projects/rna-cpat/files/v1.2.2/prebuilt_model/zebrafish_Hexamer.tsv/download"
 
 Usage:
-lncRNAs_detection --genome ./genome.fasta --gtf ./genome.gtf --bamdir ./ --cpu 20
+./lncRNAs_detection --genome ./genome.fasta --gtf ./genome.gtf --bamdir ./ --cpu 20
 
                                                 Kang 2022-09-06
 ------------------------------------------------------------------------------------------
