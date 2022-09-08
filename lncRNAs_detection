@@ -1,0 +1,231 @@
+#!/usr/bin/perl -w
+use strict;
+use warnings;
+use File::Basename;
+use Getopt::Long 'HelpMessage';
+
+my $usage=<<_EOH_;
+------------------------------------------------------------------------------------------
+This script is used to detect long non-coding RNAs (lncRNAs) from RNA-seq
+
+required softwares: stringtie, FEELNC, CPAT, CPC, gffread
+
+gtf should contain 'transcript_id' attribute (if not, will occur error when run feelnc):
+Scx22uW_1       GeneMark.hmm3   gene    2914    4009    .       +       .       gene_id "Ldim_g1"
+Scx22uW_1       GeneMark.hmm3   transcript      2914    4009    .       +       .       transcript_id "Ldim_g1.t1"; gene_id "Ldim_g1"
+Scx22uW_1       GeneMark.hmm3   start_codon     2914    2916    .       +       0       transcript_id "Ldim_g1.t1"; gene_id "Ldim_g1";
+Scx22uW_1       GeneMark.hmm3   CDS     2914    3055    .       +       0       transcript_id "Ldim_g1.t1"; gene_id "Ldim_g1";
+Scx22uW_1       GeneMark.hmm3   exon    2914    3055    0       +       .       transcript_id "Ldim_g1.t1"; gene_id "Ldim_g1";
+Scx22uW_1       GeneMark.hmm3   intron  3056    3411    .       +       2       transcript_id "Ldim_g1.t1"; gene_id "Ldim_g1";
+Scx22uW_1       GeneMark.hmm3   CDS     3412    3525    .       +       2       transcript_id "Ldim_g1.t1"; gene_id "Ldim_g1";
+Scx22uW_1       GeneMark.hmm3   exon    3412    3525    0       +       .       transcript_id "Ldim_g1.t1"; gene_id "Ldim_g1";
+Scx22uW_1       GeneMark.hmm3   intron  3526    3825    .       +       2       transcript_id "Ldim_g1.t1"; gene_id "Ldim_g1";
+Scx22uW_1       GeneMark.hmm3   CDS     3826    3884    .       +       2       transcript_id "Ldim_g1.t1"; gene_id "Ldim_g1";
+Scx22uW_1       GeneMark.hmm3   exon    3826    3884    0       +       .       transcript_id "Ldim_g1.t1"; gene_id "Ldim_g1";
+Scx22uW_1       GeneMark.hmm3   intron  3885    3982    .       +       0       transcript_id "Ldim_g1.t1"; gene_id "Ldim_g1";
+Scx22uW_1       GeneMark.hmm3   CDS     3983    4009    .       +       0       transcript_id "Ldim_g1.t1"; gene_id "Ldim_g1";
+Scx22uW_1       GeneMark.hmm3   exon    3983    4009    0       +       .       transcript_id "Ldim_g1.t1"; gene_id "Ldim_g1";
+Scx22uW_1       GeneMark.hmm3   stop_codon      4007    4009    .       +       0       transcript_id "Ldim_g1.t1"; gene_id "Ldim_g1";
+
+for CPAT: need the logit model and hexamer table of zebrafish as the training dataset
+download from "https://sourceforge.net/projects/rna-cpat/files/v1.2.2/prebuilt_model/Zebrafish_logitModel.RData/download"
+download from "https://sourceforge.net/projects/rna-cpat/files/v1.2.2/prebuilt_model/zebrafish_Hexamer.tsv/download"
+
+Usage:
+lncRNAs_detection --genome ./genome.fasta --gtf ./genome.gtf --bamdir ./ --cpu 20
+
+                                                Kang 2022-09-06
+------------------------------------------------------------------------------------------
+_EOH_
+;
+
+GetOptions(
+        'genome:s', \ my $genome,       # genome fasta
+        'gtf:s', \my $gtf,      # genome gtf
+        'bamdir:s', \my $bamdir,        # the directory of bam files
+        'cpu:i', \my $cpu,      # the number of threads
+        'help', \ my $help
+        );
+
+unless ($genome && $gtf && $bamdir) {
+        die $usage;
+}
+
+unless ($cpu) {
+        $cpu=12;
+}
+
+my $cmds="lncRNAs_detection.sh";
+open DEC, ">$cmds" or die "can not create $cmds\n$!\n";
+
+# 1. RUN stringtie
+&run_stringtie(); # obtain the merged gtf file in 1_stringtie/merged.gtf
+
+# 2. Identify lncRNAs
+# 2.1. FEELNC
+&run_FEELNC();
+
+# 2.2. CPAT
+&run_CPAT();
+
+#2.3. CPC2
+&run_CPC2();
+&run_Common();
+&FEELNC_classify();
+
+########################################
+# 1_stringtie/merged.gtf; merged_cds.fa
+sub run_stringtie {
+        system("mkdir 1_stringtie");
+        # 1.1. Assemble transcripts for each sample
+        my @bams=<$bamdir/*.bam>;
+        my @gtfs;
+        foreach my $bam (@bams) {
+                (my $ind)=basename($bam)=~/(.*)\.bam/;
+                my $ind_gtf="1_stringtie/$ind\.gtf";
+                push @gtfs, $ind_gtf;
+                my $cmd="stringtie $bam -p $cpu -G $gtf -o $ind_gtf";
+                system($cmd);
+        }
+        my $merge="stringtie --merge -p $cpu -G $gtf -o 1_stringtie/merged.gtf ";
+        foreach my $gtf (@gtfs) {
+                $merge.=$gtf." ";
+        }
+        $merge=~s/\s+$//;
+        system($merge);
+        # write a fasta file with spliced exons for each transcript in 1_stringtie/merged.gtf
+        die "No merged gtf in 1_stringtie/merged.gtf\n" unless -e "1_stringtie/merged.gtf";
+        my $cmd1="gffread -w merged_cds.fa -g $genome 1_stringtie/merged.gtf";
+        print DEC "$cmd1\n";
+        system($cmd1);
+}
+########################################
+
+########################################
+# 2_feelnc/1_candidate_lncRNA.gtf; 2_feelnc/codpot/2_codpot.lncRNA.gtf; 2_feelnc/codpot/feelnc_candidate_lncRNAs.txt
+sub run_FEELNC {
+        # $cmd1: run FEELnc_filter.pl
+        # $cmd2: run FEELnc_codpot.pl
+        my ($cmd1, $cmd2, $cmd3, $cmd4, $cmd5, $cmd6);
+        system("mkdir 2_feelnc") unless -e "2_feelnc";
+        # --monoex=-1: keep monoexonic antisense
+        $cmd1="FEELnc_filter.pl --infile=1_stringtie/merged.gtf --mRNAfile=$gtf ";
+        $cmd1.="--monoex=-1 --biotype=transcript_biotype=protein_coding --proc $cpu ";
+        $cmd1.="--outlog=2_feelnc/feelnc_filter.log > 2_feelnc/1_candidate_lncRNA.gtf";
+        print DEC "$cmd1\n";
+        system($cmd1);
+        $cmd2="FEELnc_codpot.pl --infile=2_feelnc/1_candidate_lncRNA.gtf ";
+        $cmd2.="-a $gtf --genome=$genome --mode=intergenic ";
+        $cmd2.="--outname=2_codpot --outdir=2_feelnc/codpot/";
+        print "$cmd2\n";
+        system($cmd2);
+        # can not run FEELnc_codpot.pl if a transcript has zero size, then need remove these transcripts from $gtf
+        unless (-e "2_feelnc/codpot/2_codpot.lncRNA.gtf") {
+                $cmd3="less /tmp/*.coding_rnaSize.tmp|perl -alne 'print if \$F[-1]<1' > RNA_size_0.txt";
+                print DEC "$cmd3\n";
+                system($cmd3);
+                my $trans;
+                open ZERO, "RNA_size_0.txt" or die "can not open RNA_size_0.txt\n$!\n";
+                while (<ZERO>) {
+                        chomp;
+                        next if /^name/;
+                        my @a=split;
+                        $trans.=$a[0]."|";
+                }
+                $trans=~s/\|$//;
+                $cmd4="less $gtf|perl -alne 'unless (/$trans/){print}' >Remove_zero.gtf";
+                print DEC "$cmd4\n";
+                system($cmd4);
+                $cmd5="FEELnc_codpot.pl --infile=2_feelnc/1_candidate_lncRNA.gtf ";
+                $cmd5.="-a Remove_zero.gtf --genome=$genome --mode=intergenic ";
+                $cmd5.="--outname=2_codpot --outdir=2_feelnc/codpot/";
+                print DEC "$cmd5\n";
+                system($cmd5);
+        }
+        # obtain the cutoff
+        my $cutoff;
+        my $cutfile="2_feelnc/codpot/2_codpot_RF_summary.txt";
+        open CUT, $cutfile or die "can not open $cutfile\n$!\n";
+        while (<CUT>) {
+                chomp;
+                my @a=split;
+                if (/^-With_cutoff/) {
+                        $cutoff=$a[1];
+                }
+        }
+        $cmd6="perl bin/FEELnc_LncGENE.pl 2_feelnc/codpot/2_codpot_RF.txt 1_stringtie/merged.gtf $cutoff > 2_feelnc/codpot/FEELnc_all_trans_nc.txt";
+        print DEC "$cmd6\n";
+        system($cmd6);
+}
+########################################
+
+########################################
+sub run_CPAT {
+        # cpat.py -g Ldim_all_inds_remove.fa -d zebrafish_model/Zebrafish_logitModel.RData -x zebrafish_model/zebrafish_Hexamer.tsv -o Ldim_all_inds_remove
+        my ($cmd1, $cmd2);
+        system("mkdir 3_CPAT") unless -e "3_CPAT";
+        $cmd1="cpat.py -g merged_cds.fa -d Zebrafish_logitModel.RData -x zebrafish_Hexamer.tsv -o 3_CPAT/CPAT_cps.txt";
+        print DEC "$cmd1\n";
+        system($cmd1);
+        # the cps cutoff of zebrafish is 0.38
+        # obtain lncRNA genes whose transcripts are considered as lncRNA transcripts
+        $cmd2="perl bin/cpat_LncGENE.pl 3_CPAT/CPAT_cps.txt 1_stringtie/merged.gtf > 3_CPAT/CPAT_all_trans_nc.txt";
+        print DEC "$cmd2\n";
+        system($cmd2); # CPAT_all_trans_nc.txt: the lncRNAs genes all of whose transcripts are non-coding
+}
+########################################
+
+########################################
+sub run_CPC2 {
+        # CPC2.py -i Ldim_all_inds_remove.fa -o CPC_cps.txt
+        system("mkdir 4_CPC") unless -e "4_CPC";
+        my $cmd1="CPC2.py -i merged_cds.fa -o 4_CPC/CPC_cps";
+        print DEC "$cmd1\n";
+        system($cmd1);
+        my $cmd2="perl bin/cpc_LncGENE.pl 4_CPC/CPC_cps.txt 1_stringtie/merged.gtf > 4_CPC/CPC_all_trans_nc.txt";
+        print DEC "$cmd2\n";
+        system($cmd2);
+        # CPC_all_trans_nc.txt: the lncRNAs genes all of whose transcripts are non-coding
+}
+########################################
+
+########################################
+# obtain the common lncRNAs genes detected by at least two softwares
+sub run_Common {
+        my ($feelnc, $cpat, $cpc);
+        $feelnc="2_feelnc/codpot/FEELnc_all_trans_nc.txt";
+        $cpat="3_CPAT/CPAT_all_trans_nc.txt";
+        $cpc="4_CPC/CPC_all_trans_nc.txt";
+        print DEC "cat $feelnc $cpat $cpc >all_trans_nc.txt\n";
+        system("cat $feelnc $cpat $cpc >all_trans_nc.txt");
+        my %hash; my @genes;
+        my $common="Common_lncRNA_genes.txt";
+        open COM, ">$common" or die "can not create $common\n$!\n";
+        open NCD, "all_trans_nc.txt" or die "can not open all_trans_nc.txt\n$!\n";
+        while (<NCD>) {
+                chomp;
+                my @a=split;
+                next if /^lncRNA_gene/;
+                $hash{$a[0]}++;
+                push @genes, $a[0] if $hash{$a[0]}==2;
+        }
+        foreach my $gene (@genes) {
+                print COM "$gene\n" if $hash{$gene}>=2;
+        }
+        print DEC "rm all_trans_nc.txt\n";
+        system("rm all_trans_nc.txt");
+}
+########################################
+
+########################################
+sub FEELNC_classify {
+        # obtain the gtf of common lncRNA genes
+        my $cmd1="perl bin/gtf_LncRNA_gene.pl Common_lncRNA_genes.txt 1_stringtie/merged.gtf >common_lncRNA_.gtf";
+        print DEC "$cmd1\n";
+        system($cmd1);
+        system("mkdir 5_classify") unless -e "5_classify";
+        my $cmd2="FEELnc_classifier.pl --lncrna=common_lncRNA_.gtf --mrna=$gtf --log=5_classify/classify.log > 5_classify/common_lncRNA_classify.txt";
+        print DEC "$cmd2\n";
+        system($cmd2);
+}
+########################################
