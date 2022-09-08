@@ -92,6 +92,7 @@ sub run_stringtie {
                 $merge.=$gtf." ";
         }
         $merge=~s/\s+$//;
+        print DEC "$merge\n";
         system($merge);
         # write a fasta file with spliced exons for each transcript in 1_stringtie/merged.gtf
         die "No merged gtf in 1_stringtie/merged.gtf\n" unless -e "1_stringtie/merged.gtf";
